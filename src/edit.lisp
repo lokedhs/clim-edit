@@ -8,12 +8,6 @@
 (defclass editor-pane (clim:basic-gadget)
   ())
 
-(defmethod clim:activate-gadget :after ((gadget editor-pane))
-  (log:info "activated"))
-
-(defmethod clim:deactivate-gadget :after ((gadget editor-pane))
-  (log:info "deactivated"))
-
 (defmethod clim:handle-repaint ((pane editor-pane) region)
   (multiple-value-bind (x1 y1 x2 y2)
       (clim:bounding-rectangle* region)
