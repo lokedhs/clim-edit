@@ -10,5 +10,8 @@
   :components ((:module src
                         :serial t
                         :components ((:file "package")
+                                     (:file "vars")
+                                     (:file "util")
                                      (:file "buffer")
+                                     (:file "keymap")
                                      (:file "edit")))))
