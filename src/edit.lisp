@@ -59,17 +59,23 @@
         for line = (cluffer:find-line buf row)
         do (multiple-value-bind (ascent descent)
                (line-height pane line)
-             (loop
-               for v in (line->graphemes line)
-               for pos from 0
-               for x from 0 by char-width
-               do (let* ((at-cursor-p (and (eq line (cluffer:line cursor))
-                                           (eql pos (cluffer:cursor-position cursor)))))
-                    (when at-cursor-p
-                      (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent)))
-                    (clim:draw-text* pane v x (+ y ascent)
-                                     :text-style text-style
-                                     :ink (if at-cursor-p clim:+white+ clim:+black+))))
+             (let ((pos 0)
+                   (x 0))
+               (flet ((at-cursor-p (p)
+                        (and (eq line (cluffer:line cursor))
+                             (eql pos p))))
+                 (loop
+                   for v in (line->graphemes line)
+                   do (let ((draw-cursor (at-cursor-p (cluffer:cursor-position cursor))))
+                        (when draw-cursor
+                          (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent)))
+                        (clim:draw-text* pane v x (+ y ascent)
+                                         :text-style text-style
+                                         :ink (if draw-cursor clim:+white+ clim:+black+))
+                        (incf pos (length v))
+                        (incf x char-width))
+                   finally (when (at-cursor-p (cluffer:cursor-position cursor))
+                             (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent))))))
              (incf y (+ ascent descent)))))))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
@@ -115,7 +121,9 @@
         (let ((row-number (cluffer:line-number (cluffer:line cursor))))
           (when (plusp row-number)
             (cluffer:detach-cursor cursor)
-            (cluffer:attach-cursor cursor (cluffer:find-line (editor-pane/buffer *frame*) (1- row-number)))))
+            (let ((line (cluffer:find-line (editor-pane/buffer *frame*) (1- row-number))))
+              (cluffer:attach-cursor cursor line)
+              (setf (cluffer:cursor-position cursor) (cluffer:item-count line)))))
         ;; ELSE: Just move the cursor
         (cluffer:backward-item cursor))
     (clim:repaint-sheet *frame* clim:+everywhere+)))
