@@ -6,12 +6,16 @@
 (defvar +edit-pointer-documentation-view+ (make-instance 'edit-pointer-documentation-view))
 
 (defclass cached-glyph ()
-  ((ascent  :initarg :ascent
-            :accessor content-cache-row/ascent)
-   (descent :initarg :descent
-            :accessor content-cache-row/descent)
-   (width   :initarg :width
-            :reader cached-glyph/width)))
+  ((content    :initarg :content
+               :accessor cached-glyph/content)
+   (ascent     :initarg :ascent
+               :accessor content-cache-row/ascent)
+   (descent    :initarg :descent
+               :accessor content-cache-row/descent)
+   (width      :initarg :width
+               :reader cached-glyph/width)
+   (text-style :initarg :text-style
+               :accessor cached-glyph/text-style)))
 
 (defclass content-cache-row ()
   ((ascent   :initarg :ascent
@@ -52,62 +56,84 @@
 (defun line->graphemes (line)
   (sb-unicode:graphemes (line->string line)))
 
-(defun line-height (pane line)
-  (let ((max-ascent nil)
+(defun line-height (pane line text-style)
+  (let ((char-width (clim:text-style-width text-style pane))
+        (max-ascent nil)
         (max-descent nil))
     (loop
       for v in (line->graphemes line)
       collect (multiple-value-bind (width height cursor-dx cursor-dy ascent)
-                  (clim:text-size pane v :text-style (editor-pane/text-style pane))
-                (declare (ignore cursor-dx cursor-dy))
+                  (clim:text-size pane v :text-style text-style)
+                (declare (ignore width cursor-dx cursor-dy))
                 (when (or (null max-ascent) (> ascent max-ascent))
                   (setq max-ascent ascent))
                 (let ((descent (- height ascent)))
                   (when (or (null max-descent) (> descent max-descent))
                     (setq max-descent descent))
-                  (make-instance 'cached-glyph :ascent ascent :descent descent :width width)))
+                  (make-instance 'cached-glyph :ascent ascent
+                                               :descent descent
+                                               :width char-width
+                                               :text-style text-style
+                                               :content v)))
         into glyph-line
-      finally (return (values max-ascent max-descent glyph-line)))))
+      finally (return (make-instance 'content-cache-row
+                                     :ascent max-ascent
+                                     :descent max-descent
+                                     :elements glyph-line)))))
+
+(defun recompute-content-cache (pane)
+  (let* ((text-style (editor-pane/text-style pane))
+         (cache (editor-pane/content-cache pane))
+         (pane-height (nth-value 1 (clim:bounding-rectangle-size pane))))
+    (setf (fill-pointer (content-cache/rows cache)) 0)
+    (loop
+      with buf = (editor-pane/buffer pane)
+      with y = 0
+      for row from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
+      for line = (cluffer:find-line buf row)
+      for cache-row = (line-height pane line text-style)
+      for ascent = (content-cache-row/ascent cache-row)
+      for descent = (content-cache-row/descent cache-row)
+      until (> y pane-height)
+      do (progn
+           (incf y (+ ascent descent))
+           (vector-push-extend cache-row (content-cache/rows cache))))))
 
 (defmethod clim:handle-repaint ((pane editor-pane) region)
+  (recompute-content-cache pane)
   (multiple-value-bind (x1 y1 x2 y2)
       (clim:bounding-rectangle* region)
     (clim:draw-rectangle* pane x1 y1 x2 y2 :ink clim:+white+ :filled t)
     (let* ((text-style (editor-pane/text-style pane))
-           (char-width (clim:text-style-width text-style pane))
            (cursor (editor-pane/cursor pane))
            (cache (editor-pane/content-cache pane)))
-      (setf (fill-pointer (content-cache/rows cache)) 0)
       (loop
         with buf = (editor-pane/buffer pane)
         with y = 0
-        for row from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
+        for cache-row across (content-cache/rows cache)
+        for row from (editor-pane/scroll-pos pane)
         for line = (cluffer:find-line buf row)
-        do (multiple-value-bind (ascent descent cache-elements)
-               (line-height pane line)
-             (let ((pos 0)
-                   (x 0))
-               (flet ((at-cursor-p (p)
-                        (and (eq line (cluffer:line cursor))
-                             (eql pos p))))
-                 (loop
-                   for v in (line->graphemes line)
-                   do (let ((draw-cursor (at-cursor-p (cluffer:cursor-position cursor))))
-                        (when draw-cursor
-                          (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent)))
-                        (clim:draw-text* pane v x (+ y ascent)
-                                         :text-style text-style
-                                         :ink (if draw-cursor clim:+white+ clim:+black+))
-                        (incf pos (length v))
-                        (incf x char-width))
-                   finally (when (at-cursor-p (cluffer:cursor-position cursor))
-                             (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent))))))
-             (incf y (+ ascent descent))
-             (vector-push-extend (make-instance 'content-cache-row
-                                                :ascent ascent
-                                                :descent descent
-                                                :elements cache-elements)
-                                 (content-cache/rows cache)))))))
+        for ascent = (content-cache-row/ascent cache-row)
+        for descent = (content-cache-row/descent cache-row)
+        do (let ((pos 0)
+                 (x 0)
+                 (cursor-pos (if (eq line (cluffer:line cursor))
+                                 (cluffer:cursor-position cursor)
+                                 nil)))
+             (loop
+               for v in (content-cache-row/elements cache-row)
+               for char-width = (cached-glyph/width v)
+               do (let ((draw-cursor (and cursor-pos (eql cursor-pos pos))))
+                    (when draw-cursor
+                      (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent)))
+                    (clim:draw-text* pane (cached-glyph/content v) x (+ y ascent)
+                                     :text-style text-style
+                                     :ink (if draw-cursor clim:+white+ clim:+black+))
+                    (incf pos (length (cached-glyph/content v)))
+                    (incf x (cached-glyph/width v)))
+               finally (when (and cursor-pos (eql cursor-pos pos))
+                         (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent)))))
+           (incf y (+ ascent descent))))))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
   (with-current-frame pane
