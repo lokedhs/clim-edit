@@ -5,6 +5,26 @@
 
 (defvar +edit-pointer-documentation-view+ (make-instance 'edit-pointer-documentation-view))
 
+(defclass cached-glyph ()
+  ((ascent  :initarg :ascent
+            :accessor content-cache-row/ascent)
+   (descent :initarg :descent
+            :accessor content-cache-row/descent)
+   (width   :initarg :width
+            :reader cached-glyph/width)))
+
+(defclass content-cache-row ()
+  ((ascent   :initarg :ascent
+             :accessor content-cache-row/ascent)
+   (descent  :initarg :descent
+             :accessor content-cache-row/descent)
+   (elements :initarg :elements
+             :accessor content-cache-row/elements)))
+
+(defclass content-cache ()
+  ((rows :initform (make-array 100 :adjustable t :fill-pointer 0)
+          :reader content-cache/rows)))
+
 (defclass editor-pane (clim:basic-gadget)
   ((buffer :initform (make-buffer)
            :initarg :buffer
@@ -14,7 +34,9 @@
                :accessor editor-pane/scroll-pos)
    (default-text-style :initform (clim:make-text-style "Source Code Pro Medium" "Medium" 20)
                        :initarg :default-text-style
-                       :reader editor-pane/text-style)))
+                       :reader editor-pane/text-style)
+   (content-cache :initform (make-instance 'content-cache)
+                  :reader editor-pane/content-cache)))
 
 (defmethod initialize-instance :after ((obj editor-pane) &key)
   (setf (slot-value obj 'cursor) (make-cursor (editor-pane/buffer obj))))
@@ -35,15 +57,17 @@
         (max-descent nil))
     (loop
       for v in (line->graphemes line)
-      do (multiple-value-bind (width height cursor-dx cursor-dy ascent)
-             (clim:text-size pane v :text-style (editor-pane/text-style pane))
-           (declare (ignore width cursor-dx cursor-dy))
-           (when (or (null max-ascent) (> ascent max-ascent))
-             (setq max-ascent ascent))
-           (let ((descent (- height ascent)))
-             (when (or (null max-descent) (> descent max-descent))
-               (setq max-descent descent)))))
-    (values max-ascent max-descent)))
+      collect (multiple-value-bind (width height cursor-dx cursor-dy ascent)
+                  (clim:text-size pane v :text-style (editor-pane/text-style pane))
+                (declare (ignore cursor-dx cursor-dy))
+                (when (or (null max-ascent) (> ascent max-ascent))
+                  (setq max-ascent ascent))
+                (let ((descent (- height ascent)))
+                  (when (or (null max-descent) (> descent max-descent))
+                    (setq max-descent descent))
+                  (make-instance 'cached-glyph :ascent ascent :descent descent :width width)))
+        into glyph-line
+      finally (return (values max-ascent max-descent glyph-line)))))
 
 (defmethod clim:handle-repaint ((pane editor-pane) region)
   (multiple-value-bind (x1 y1 x2 y2)
@@ -51,13 +75,15 @@
     (clim:draw-rectangle* pane x1 y1 x2 y2 :ink clim:+white+ :filled t)
     (let* ((text-style (editor-pane/text-style pane))
            (char-width (clim:text-style-width text-style pane))
-           (cursor (editor-pane/cursor pane)))
+           (cursor (editor-pane/cursor pane))
+           (cache (editor-pane/content-cache pane)))
+      (setf (fill-pointer (content-cache/rows cache)) 0)
       (loop
         with buf = (editor-pane/buffer pane)
         with y = 0
         for row from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
         for line = (cluffer:find-line buf row)
-        do (multiple-value-bind (ascent descent)
+        do (multiple-value-bind (ascent descent cache-elements)
                (line-height pane line)
              (let ((pos 0)
                    (x 0))
@@ -76,7 +102,12 @@
                         (incf x char-width))
                    finally (when (at-cursor-p (cluffer:cursor-position cursor))
                              (clim:draw-rectangle* pane x y (+ x char-width) (+ y ascent descent))))))
-             (incf y (+ ascent descent)))))))
+             (incf y (+ ascent descent))
+             (vector-push-extend (make-instance 'content-cache-row
+                                                :ascent ascent
+                                                :descent descent
+                                                :elements cache-elements)
+                                 (content-cache/rows cache)))))))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
   (with-current-frame pane
