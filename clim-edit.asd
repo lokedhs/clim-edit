@@ -6,7 +6,8 @@
   :depends-on (:alexandria
                :mcclim
                :log4cl
-               :cluffer)
+               :cluffer
+               :collectors)
   :components ((:module src
                         :serial t
                         :components ((:file "package")

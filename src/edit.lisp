@@ -6,24 +6,24 @@
 (defvar +edit-pointer-documentation-view+ (make-instance 'edit-pointer-documentation-view))
 
 (defclass cached-glyph ()
-  ((content    :initarg :content
-               :accessor cached-glyph/content)
-   (ascent     :initarg :ascent
-               :accessor content-cache-row/ascent)
-   (descent    :initarg :descent
-               :accessor content-cache-row/descent)
-   (width      :initarg :width
-               :reader cached-glyph/width)
-   (text-style :initarg :text-style
-               :accessor cached-glyph/text-style)))
+  ((ascent  :initarg :ascent
+            :accessor content-cache-row/ascent)
+   (descent :initarg :descent
+            :accessor content-cache-row/descent)
+   (width   :initarg :width
+            :reader cached-glyph/width)
+   (key     :initarg :key
+            :reader cached-glyph/key)))
 
 (defclass content-cache-row ()
-  ((ascent   :initarg :ascent
-             :accessor content-cache-row/ascent)
+  ((y        :initarg y
+             :reader content-cache-row/y)
+   (ascent   :initarg :ascent
+             :reader content-cache-row/ascent)
    (descent  :initarg :descent
-             :accessor content-cache-row/descent)
+             :reader content-cache-row/descent)
    (elements :initarg :elements
-             :accessor content-cache-row/elements)))
+             :reader content-cache-row/elements)))
 
 (defclass content-cache ()
   ((rows :initform (make-array 100 :adjustable t :fill-pointer 0)
@@ -80,6 +80,42 @@
                                      :ascent max-ascent
                                      :descent max-descent
                                      :elements glyph-line)))))
+
+;;; Format of glyph key: ("character" cursor-p). The final column contains NIL as character
+
+(defun compute-line-keys (pane line)
+  (collectors:with-collector (result)
+    (loop
+      with cursor = (editor-pane/cursor pane)
+      with pos = 0
+      for v in (line->graphemes line)
+      do (progn
+           (result (list v
+                         (and (eq line (cluffer:line cursor)
+                                  (eql (cluffer:cursor-position cursor) pos)))))
+           (incf pos))
+      finally (list nil (and (eq line (cluffer:line cursor)
+                                  (eql (cluffer:cursor-position cursor) pos)))))))
+
+(defun recompute-and-repaint-content (pane)
+  (let* ((cache (editor-pane/content-cache pane))
+         (cache-rows (content-cache/rows cache))
+         (buf (editor-pane/buffer pane)))
+    (loop
+      with y = 0
+      for row-index from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
+      for cache-row-index from 0
+      for line = (cluffer:find-line buf row-index)
+      for line-keys = (compute-line-keys pane line)
+      for cache-row = (aref cache-rows cache-row-index)
+      do (progn
+           (if (eql (content-cache-row/y cache-row) y)
+               ;; Cache row is on the same vertical position, optimised redraw is possible
+               x
+               ;; ELSE: Cache row has moved, we need to do a full redraw
+               y)
+           (incf y (+ (content-cache-row/ascent cache-row)
+                      (content-cache-row/descent cache-row)))))))
 
 (defun recompute-content-cache (pane)
   (let* ((text-style (editor-pane/text-style pane))
