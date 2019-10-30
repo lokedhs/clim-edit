@@ -44,7 +44,9 @@
                        :initarg :default-text-style
                        :reader editor-pane/text-style)
    (content-cache :initform (make-instance 'content-cache)
-                  :reader editor-pane/content-cache)))
+                  :reader editor-pane/content-cache)
+   (pixmap :initform nil
+           :accessor editor-pane/pixmap)))
 
 (defmethod initialize-instance :after ((obj editor-pane) &key)
   (setf (slot-value obj 'editor-pane-cursor) (make-cursor (editor-pane/buffer obj))))
@@ -114,13 +116,38 @@
                                    :y y
                                    :width x))))
 
+(defun flush-content-cache (cache)
+  (loop
+    with rows = (content-cache/rows cache)
+    for i from 0 below (length rows)
+    do (setf (aref rows i) nil)))
+
+(defun reallocate-pixmap (pane)
+  (multiple-value-bind (pane-x1 pane-y1 pane-x2 pane-y2)
+      (clim:bounding-rectangle* (clim:sheet-region pane))
+    (let ((width (- pane-x2 pane-x1))
+          (height (- pane-y2 pane-y1))
+          (old-pixmap (editor-pane/pixmap pane)))
+      (when (or (null old-pixmap)
+                (/= (clim:pixmap-width old-pixmap) width)
+                (/= (clim:pixmap-height old-pixmap) height))
+        ;; Either we didn' thave a pixmap allocated, or it's of the
+        ;; wrong size. Allocate a new one and flush the content cache.
+        (let ((pixmap (clim:allocate-pixmap pane width height)))
+          (clim:draw-rectangle* pixmap 0 0 (1- width) (1- height) :filled t :ink clim:+white+)
+          (setf (editor-pane/pixmap pane) pixmap)
+          (flush-content-cache (editor-pane/content-cache pane)))))))
+
 (defun recompute-and-repaint-content (pane &key force-repaint region)
+  (reallocate-pixmap pane)
+  ;;
   (multiple-value-bind (region-x1 region-y1 region-x2 region-y2)
       (clim:bounding-rectangle* (clim:region-intersection (clim:sheet-region pane) (or region clim:+everywhere+)))
     (let* ((cache (editor-pane/content-cache pane))
            (cache-rows (content-cache/rows cache))
            (buf (editor-pane/buffer pane))
-           (text-style (editor-pane/text-style pane)))
+           (text-style (editor-pane/text-style pane))
+           (pixmap (editor-pane/pixmap pane)))
       (loop
         with y = 0
         for row-index from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
@@ -153,11 +180,11 @@
                                          (cached-glyph/x (car old-glyph-list))))))
                    do (let ((clip-region (clim:make-rectangle* x y (+ x width) (+ y ascent descent)))
                             (draw-cursor (second key)))
-                        (clim:draw-rectangle* pane x y (+ x width) (+ y ascent descent)
+                        (clim:draw-rectangle* pixmap x y (+ x width) (+ y ascent descent)
                                               :filled t
                                               :ink (if draw-cursor clim:+black+ clim:+white+)
                                               :clipping-region clip-region)
-                        (clim:draw-text* pane (or (first key) " ")
+                        (clim:draw-text* pixmap (or (first key) " ")
                                          x (+ y ascent)
                                          :text-style text-style
                                          :ink (if draw-cursor clim:+white+ clim:+black+)
@@ -168,7 +195,7 @@
                  finally (when (and (or (null old-cache-row)
                                         (< x (content-cache-row/width old-cache-row)))
                                     (< x region-x2))
-                           (clim:draw-rectangle* pane x y region-x2 (+ y ascent descent)
+                           (clim:draw-rectangle* pixmap x y region-x2 (+ y ascent descent)
                                                  :filled t
                                                  :ink clim:+white+))))
              (incf y (+ ascent descent))
@@ -180,6 +207,7 @@
     (log:info "repaint: ~s" region)
     (clim:draw-rectangle* pane x1 y1 x2 y2 :ink clim:+white+ :filled t)
     (recompute-and-repaint-content pane :force-repaint t :region region)
+    (clim:copy-from-pixmap (editor-pane/pixmap pane) x1 y1 (- x2 x1) (- y2 y1) pane x1 y1)
     (clim:draw-line* pane 10 10 100 50 :ink clim:+red+)))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
