@@ -34,8 +34,10 @@
              :reader content-cache-row/elements)))
 
 (defclass content-cache ()
-  ((rows :initform (make-array 100 :initial-element nil :adjustable t)
-          :reader content-cache/rows)))
+  ((rows     :initform (make-array 100 :initial-element nil :adjustable t)
+             :reader content-cache/rows)
+   (num-rows :initform 0
+             :accessor content-cache/num-rows)))
 
 (defclass editor-pane (clim:basic-gadget)
   ((buffer :initform (make-buffer)
@@ -154,8 +156,9 @@
            (pixmap (editor-pane/pixmap pane)))
       (loop
         with y = 0
-        for row-index from (editor-pane/scroll-pos pane) below (cluffer:line-count buf)
-        for cache-row-index from 0
+        with line-count = (cluffer:line-count buf)
+        with row-index = (editor-pane/scroll-pos pane)
+        with cache-row-index = 0
         for line = (cluffer:find-line buf row-index)
         for line-keys = (compute-line-keys pane line)
         until (> y region-y2)
@@ -203,7 +206,22 @@
                                                  :filled t
                                                  :ink clim:+white+))))
              (incf y (+ ascent descent))
-             (setf (aref cache-rows cache-row-index) new-cache-row)))))
+             (setf (aref cache-rows cache-row-index) new-cache-row)
+             (incf row-index)
+             (incf cache-row-index))
+        until (>= row-index line-count)
+        finally (progn
+                  ;; Check if there is old content that needs to be cleared at the end of the buffer
+                  (when (< cache-row-index (content-cache/num-rows cache))
+                    (let* ((last-cache (aref cache-rows (1- (content-cache/num-rows cache))))
+                           (clear-bottom-y (+ (content-cache-row/y last-cache)
+                                              (content-cache-row/ascent last-cache)
+                                              (content-cache-row/descent last-cache))))
+                      (clim:draw-rectangle* pixmap
+                                            (max 0 region-x1) y region-x2 clear-bottom-y
+                                            :filled t :ink clim:+white+)))
+                  ;; Update the number of cached rows
+                  (setf (content-cache/num-rows cache) cache-row-index)))))
   ;;
   (clim:queue-repaint pane (make-instance 'clim:window-repaint-event :sheet pane :region clim:+everywhere+)))
 
