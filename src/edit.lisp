@@ -101,7 +101,7 @@
     for key in line-keys
     collect (multiple-value-bind (width height cursor-dx cursor-dy ascent)
                 (clim:text-size pane (or (first key) " ") :text-style text-style)
-              (declare (ignore width cursor-dx cursor-dy))
+              (declare (ignore width cursor-dy))
               (when (or (null max-ascent) (> ascent max-ascent))
                 (setq max-ascent ascent))
               (let ((descent (- height ascent)))
@@ -110,7 +110,7 @@
                 (prog1
                     (make-instance 'cached-glyph :ascent ascent
                                                  :descent descent
-                                                 :width char-width
+                                                 :width cursor-dx
                                                  :x x
                                                  :key key)
                   (incf x char-width))))
