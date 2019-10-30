@@ -5,6 +5,10 @@
 
 (defvar +edit-pointer-documentation-view+ (make-instance 'edit-pointer-documentation-view))
 
+;;; Workaround for bug in McCLIM
+(defmethod clim-internals::%invalidate-cached-device-regions ((sheet climi::mirrored-pixmap))
+  nil)
+
 (defclass cached-glyph ()
   ((ascent  :initarg :ascent
             :accessor content-cache-row/ascent)
@@ -199,20 +203,24 @@
                                                  :filled t
                                                  :ink clim:+white+))))
              (incf y (+ ascent descent))
-             (setf (aref cache-rows cache-row-index) new-cache-row))))))
+             (setf (aref cache-rows cache-row-index) new-cache-row)))))
+  ;;
+  (clim:queue-repaint pane (make-instance 'clim:window-repaint-event :sheet pane :region clim:+everywhere+)))
 
 (defmethod clim:handle-repaint ((pane editor-pane) region)
   (multiple-value-bind (x1 y1 x2 y2)
       (clim:bounding-rectangle* region)
-    (log:info "repaint: ~s" region)
     (clim:draw-rectangle* pane x1 y1 x2 y2 :ink clim:+white+ :filled t)
+    #+nil
     (recompute-and-repaint-content pane :force-repaint t :region region)
-    (clim:copy-from-pixmap (editor-pane/pixmap pane) x1 y1 (- x2 x1) (- y2 y1) pane x1 y1)
-    (clim:draw-line* pane 10 10 100 50 :ink clim:+red+)))
+    (unless (editor-pane/pixmap pane)
+      (recompute-and-repaint-content pane))
+    (clim:copy-from-pixmap (editor-pane/pixmap pane) x1 y1 (- x2 x1) (- y2 y1) pane x1 y1)))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
   (with-current-frame pane
-    (process-key pane *global-keymap* event)))
+    (process-key pane *global-keymap* event)
+    (recompute-and-repaint-content *frame*)))
 
 (defun make-editor-pane ()
   (clim:make-pane 'editor-pane :buffer (foo)))
@@ -232,8 +240,8 @@
     (clim:run-frame-top-level frame)))
 
 (define-edit-function move-right (() (:right))
-  (let ((cursor (editor-pane/cursor *frame*))
-        (buffer (editor-pane/buffer *frame*)))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (buffer (cluffer:buffer cursor)))
     (if (= (cluffer:cursor-position cursor) (cluffer:item-count (cluffer:line cursor)))
         ;; At end of line, wrap to next line
         (let ((row-number (cluffer:line-number (cluffer:line cursor))))
@@ -241,22 +249,66 @@
             (cluffer:detach-cursor cursor)
             (cluffer:attach-cursor cursor (cluffer:find-line buffer (1+ row-number)))))
         ;; ELSE: No need to wrap, just move the cursor one character to the right
-        (cluffer:forward-item cursor))
-    (recompute-and-repaint-content *frame*)))
+        (cluffer:forward-item cursor))))
 
 (define-edit-function move-left (() (:left))
-  (let ((cursor (editor-pane/cursor *frame*)))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (buffer (cluffer:buffer cursor)))
     (if (zerop (cluffer:cursor-position cursor))
         ;; At beginning of line, wrap to previous line
         (let ((row-number (cluffer:line-number (cluffer:line cursor))))
           (when (plusp row-number)
             (cluffer:detach-cursor cursor)
-            (let ((line (cluffer:find-line (editor-pane/buffer *frame*) (1- row-number))))
+            (let ((line (cluffer:find-line buffer (1- row-number))))
               (cluffer:attach-cursor cursor line)
               (setf (cluffer:cursor-position cursor) (cluffer:item-count line)))))
         ;; ELSE: Just move the cursor
-        (cluffer:backward-item cursor))
-    (recompute-and-repaint-content *frame*)))
+        (cluffer:backward-item cursor))))
+
+(define-edit-function move-up (() (:up))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (line (cluffer:line cursor))
+         (buffer (cluffer:buffer cursor))
+         (row (cluffer:line-number line)))
+    (when (plusp row)
+      (let ((col (cluffer:cursor-position cursor))
+            (new-line (cluffer:find-line buffer (1- row))))
+        (cluffer:detach-cursor cursor)
+        (cluffer:attach-cursor cursor new-line)
+        (setf (cluffer:cursor-position cursor) (min col (cluffer:item-count new-line)))))))
+
+(define-edit-function move-down (() (:down))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (line (cluffer:line cursor))
+         (buffer (cluffer:buffer cursor))
+         (row (cluffer:line-number line)))
+    (when (< row (1- (cluffer:line-count buffer)))
+      (let ((col (cluffer:cursor-position cursor))
+            (new-line (cluffer:find-line buffer (1+ row))))
+        (cluffer:detach-cursor cursor)
+        (cluffer:attach-cursor cursor new-line)
+        (setf (cluffer:cursor-position cursor) (min col (cluffer:item-count new-line)))))))
+
+(define-edit-function delete-left (() (:backspace))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (buffer (cluffer:buffer cursor))
+         (line (cluffer:line cursor))
+         (pos (cluffer:cursor-position cursor)))
+    (cond ((plusp pos)
+           (cluffer:delete-item-at-position line (1- pos)))
+          ((and (zerop pos)
+                (plusp (cluffer:line-number line)))
+           (cluffer:join-line (cluffer:find-line buffer (1- (cluffer:line-number line))))))))
+
+(define-edit-function delete-right (() (:delete))
+  (let* ((cursor (editor-pane/cursor *frame*))
+         (buffer (cluffer:buffer cursor))
+         (line (cluffer:line cursor))
+         (pos (cluffer:cursor-position cursor)))
+    (cond ((< pos (cluffer:item-count line))
+           (cluffer:delete-item cursor))
+          ((< (cluffer:line-number line) (1- (cluffer:line-count buffer)))
+           (cluffer:join-line line)))))
 
 (defun insert-string (string)
   (let ((cursor (editor-pane/cursor *frame*)))
@@ -265,5 +317,4 @@
       if (or (eql ch #\Newline) (eql ch #\Return))
         do (cluffer:split-line cursor)
       else
-        do (cluffer:insert-item cursor ch))
-    (recompute-and-repaint-content *frame*)))
+        do (cluffer:insert-item cursor ch))))
