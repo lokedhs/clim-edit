@@ -40,8 +40,7 @@
              :accessor content-cache/num-rows)))
 
 (defclass editor-pane (clim:basic-gadget)
-  ((buffer :initform (make-buffer)
-           :initarg :buffer
+  ((buffer :initform nil
            :reader editor-pane/buffer)
    (editor-pane-cursor :reader editor-pane/cursor)
    (scroll-pos :initform 0
@@ -54,8 +53,21 @@
    (pixmap :initform nil
            :accessor editor-pane/pixmap)))
 
-(defmethod initialize-instance :after ((obj editor-pane) &key)
-  (setf (slot-value obj 'editor-pane-cursor) (make-cursor (editor-pane/buffer obj))))
+(defmethod initialize-instance :after ((obj editor-pane) &key buffer)
+  (unless buffer
+    (error "editor-pane requires a buffer"))
+  (assign-buffer obj buffer))
+
+(defun assign-buffer (pane buffer)
+  (check-type pane editor-pane)
+  (check-type buffer buffer)
+  (alexandria:when-let ((old-buffer (editor-pane/buffer pane)))
+    (assert (member pane (buffer/frames old-buffer)))
+    (setf (buffer/frames old-buffer) (remove pane (buffer/frames old-buffer))))
+  (assert (not (member pane (buffer/frames buffer))))
+  (setf (slot-value pane 'buffer) buffer)
+  (push pane (buffer/frames buffer))
+  (setf (slot-value pane 'editor-pane-cursor) (make-cursor buffer)))
 
 (defmacro with-current-frame (pane &body body)
   (alexandria:once-only (pane)
@@ -195,7 +207,8 @@
                                          x (+ y ascent)
                                          :text-style text-style
                                          :ink (if draw-cursor clim:+white+ clim:+black+)
-                                         :clipping-region clip-region))
+                                         :clipping-region clip-region)
+                        (clim:copy-from-pixmap pixmap x y width (+ ascent descent) pane x y))
                  do (progn
                       (incf x width)
                       (setf old-glyph-list (cdr old-glyph-list)))
@@ -204,7 +217,8 @@
                                     (< x region-x2))
                            (clim:draw-rectangle* pixmap x y region-x2 (+ y ascent descent)
                                                  :filled t
-                                                 :ink clim:+white+))))
+                                                 :ink clim:+white+)
+                           (clim:copy-from-pixmap pixmap x y (- region-x2 region-x1) (+ ascent descent) pane x y))))
              (incf y (+ ascent descent))
              (setf (aref cache-rows cache-row-index) new-cache-row)
              (incf row-index)
@@ -216,20 +230,22 @@
                     (let* ((last-cache (aref cache-rows (1- (content-cache/num-rows cache))))
                            (clear-bottom-y (+ (content-cache-row/y last-cache)
                                               (content-cache-row/ascent last-cache)
-                                              (content-cache-row/descent last-cache))))
+                                              (content-cache-row/descent last-cache)))
+                           (rect-x (max 0 region-x1)))
                       (clim:draw-rectangle* pixmap
-                                            (max 0 region-x1) y region-x2 clear-bottom-y
-                                            :filled t :ink clim:+white+)))
+                                            rect-x y region-x2 clear-bottom-y
+                                            :filled t :ink clim:+white+)
+                      (clim:copy-from-pixmap pixmap rect-x y (- region-x2 region-x1) (- clear-bottom-y y) pane rect-x y)))
                   ;; Update the number of cached rows
                   (setf (content-cache/num-rows cache) cache-row-index)))))
   ;;
+  #+nil
   (clim:queue-repaint pane (make-instance 'clim:window-repaint-event :sheet pane :region clim:+everywhere+)))
 
 (defmethod clim:handle-repaint ((pane editor-pane) region)
   (multiple-value-bind (x1 y1 x2 y2)
       (clim:bounding-rectangle* region)
     (clim:draw-rectangle* pane x1 y1 x2 y2 :ink clim:+white+ :filled t)
-    #+nil
     (recompute-and-repaint-content pane :force-repaint t :region region)
     (unless (editor-pane/pixmap pane)
       (recompute-and-repaint-content pane))
@@ -258,81 +274,25 @@
     (clim:run-frame-top-level frame)))
 
 (define-edit-function move-right (() (:right))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (buffer (cluffer:buffer cursor)))
-    (if (= (cluffer:cursor-position cursor) (cluffer:item-count (cluffer:line cursor)))
-        ;; At end of line, wrap to next line
-        (let ((row-number (cluffer:line-number (cluffer:line cursor))))
-          (when (< row-number (1- (cluffer:line-count buffer)))
-            (cluffer:detach-cursor cursor)
-            (cluffer:attach-cursor cursor (cluffer:find-line buffer (1+ row-number)))))
-        ;; ELSE: No need to wrap, just move the cursor one character to the right
-        (cluffer:forward-item cursor))))
+  (buffer-move-right (editor-pane/cursor *frame*)))
 
 (define-edit-function move-left (() (:left))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (buffer (cluffer:buffer cursor)))
-    (if (zerop (cluffer:cursor-position cursor))
-        ;; At beginning of line, wrap to previous line
-        (let ((row-number (cluffer:line-number (cluffer:line cursor))))
-          (when (plusp row-number)
-            (cluffer:detach-cursor cursor)
-            (let ((line (cluffer:find-line buffer (1- row-number))))
-              (cluffer:attach-cursor cursor line)
-              (setf (cluffer:cursor-position cursor) (cluffer:item-count line)))))
-        ;; ELSE: Just move the cursor
-        (cluffer:backward-item cursor))))
+  (buffer-move-left (editor-pane/cursor *frame*)))
 
 (define-edit-function move-up (() (:up))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (line (cluffer:line cursor))
-         (buffer (cluffer:buffer cursor))
-         (row (cluffer:line-number line)))
-    (when (plusp row)
-      (let ((col (cluffer:cursor-position cursor))
-            (new-line (cluffer:find-line buffer (1- row))))
-        (cluffer:detach-cursor cursor)
-        (cluffer:attach-cursor cursor new-line)
-        (setf (cluffer:cursor-position cursor) (min col (cluffer:item-count new-line)))))))
+  (buffer-move-up (editor-pane/cursor *frame*)))
 
 (define-edit-function move-down (() (:down))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (line (cluffer:line cursor))
-         (buffer (cluffer:buffer cursor))
-         (row (cluffer:line-number line)))
-    (when (< row (1- (cluffer:line-count buffer)))
-      (let ((col (cluffer:cursor-position cursor))
-            (new-line (cluffer:find-line buffer (1+ row))))
-        (cluffer:detach-cursor cursor)
-        (cluffer:attach-cursor cursor new-line)
-        (setf (cluffer:cursor-position cursor) (min col (cluffer:item-count new-line)))))))
+  (buffer-move-down (editor-pane/cursor *frame*)))
 
 (define-edit-function delete-left (() (:backspace))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (buffer (cluffer:buffer cursor))
-         (line (cluffer:line cursor))
-         (pos (cluffer:cursor-position cursor)))
-    (cond ((plusp pos)
-           (cluffer:delete-item-at-position line (1- pos)))
-          ((and (zerop pos)
-                (plusp (cluffer:line-number line)))
-           (cluffer:join-line (cluffer:find-line buffer (1- (cluffer:line-number line))))))))
+  (buffer-delete-left (editor-pane/cursor *frame*)))
 
 (define-edit-function delete-right (() (:delete))
-  (let* ((cursor (editor-pane/cursor *frame*))
-         (buffer (cluffer:buffer cursor))
-         (line (cluffer:line cursor))
-         (pos (cluffer:cursor-position cursor)))
-    (cond ((< pos (cluffer:item-count line))
-           (cluffer:delete-item cursor))
-          ((< (cluffer:line-number line) (1- (cluffer:line-count buffer)))
-           (cluffer:join-line line)))))
+  (buffer-delete-right (editor-pane/cursor *frame*)))
+
+(define-edit-function insert-newline (() (:return))
+  (insert-string (format nil "~c" #\Newline)))
 
 (defun insert-string (string)
-  (let ((cursor (editor-pane/cursor *frame*)))
-    (loop
-      for ch across string
-      if (or (eql ch #\Newline) (eql ch #\Return))
-        do (cluffer:split-line cursor)
-      else
-        do (cluffer:insert-item cursor ch))))
+  (buffer-insert-string (editor-pane/cursor *frame*) string))
