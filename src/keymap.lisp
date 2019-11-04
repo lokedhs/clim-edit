@@ -4,12 +4,14 @@
   ((map :initform (make-hash-table :test 'equal)
         :reader keymap/map)))
 
+#+nil
 (defgeneric process-key (pane keymap event)
   (:method (pane keymap event)
     ;; The default implemnetation does nothing
     nil)
   (:documentation "Dispatches a key event using the given keymap"))
 
+#+nil
 (defmethod process-key (pane (keymap keymap) (event clim:key-release-event))
   (let* ((key (clim:keyboard-event-key-name event))
          (mapping (gethash key (keymap/map keymap))))
@@ -24,6 +26,25 @@
           (t
            (log:warn "Unknown mapping type: ~s" mapping)))))
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun valid-key-p (key)
+    (and (listp key)
+         (eq (first key) :key)
+         (symbolp (second key)))))
+
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defun normalise-key-name (key)
+    (ecase (car key)
+      (:key (cons (car key) (sort (cdr key) #'string<))))))
+
+(defun process-key (keymap key)
+  (alexandria:if-let ((mapping (gethash (normalise-key-name key) (keymap/map keymap))))
+    (progn
+      (funcall mapping)
+      t)
+    ;; ELSE: No mapping
+    nil))
+
 (defun define-key (keymap mapping fn)
   (setf (gethash mapping (keymap/map keymap)) fn))
 
@@ -36,4 +57,6 @@
        ,@body)
      ,@(loop
          for mapping in mappings
-         collect `(define-key *global-keymap* ',mapping ',name))))
+         do (unless (valid-key-p mapping)
+              (error "Invalid key: ~s" mapping))
+         collect `(define-key *global-keymap* ',(normalise-key-name mapping) ',name))))

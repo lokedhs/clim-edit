@@ -105,9 +105,21 @@ frames can display the same buffer."))
           ((< (cluffer:line-number line) (1- (cluffer:line-count buffer)))
            (cluffer:join-line line)))))
 
+(defun buffer-beginning-of-line (cursor)
+  (setf (cluffer:cursor-position cursor) 0))
+
+(defun buffer-end-of-line (cursor)
+  (setf (cluffer:cursor-position cursor) (cluffer:item-count cursor)))
+
+(defun buffer-goto-line (cursor n)
+  (let ((buffer (cluffer:buffer cursor)))
+    (cluffer:detach-cursor cursor)
+    (cluffer:attach-cursor cursor (cluffer:find-line buffer (min n (1- (cluffer:line-count buffer)))))))
+
 (defun buffer-insert-string (cursor string)
+  (log:trace "Inserting: ~s" (string->graphemes string))
   (loop
-    for ch across string
+    for ch in (string->graphemes string)
     if (eql ch #\Newline)
       do (cluffer:split-line cursor)
     else

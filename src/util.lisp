@@ -36,3 +36,19 @@
                      ,@(if height-sym `((,height-sym ,height))))
                  ,(make-position-form)))
             (make-position-form))))))
+
+(defun line->string (line)
+  (coerce (cluffer:items line) 'string))
+
+(defun string->graphemes (s)
+  #+sbcl
+  (mapcar #'(lambda (v)
+              (if (eql (length v) 1)
+                  (aref v 0)
+                  v))
+          (sb-unicode:graphemes s))
+  #-sbcl
+  (coerce s 'list))
+
+(defun line->graphemes (line)
+  (string->graphemes (line->string line)))

@@ -74,15 +74,6 @@
     `(let ((*frame* ,pane))
        ,@body)))
 
-(defun line->string (line)
-  (coerce (cluffer:items line) 'string))
-
-(defun line->graphemes (line)
-  #+sbcl
-  (sb-unicode:graphemes (line->string line))
-  #-sbcl
-  (mapcar #'string (coerce (line->string line) 'list)))
-
 ;;; Format of glyph key: ("character" cursor-p). The final column contains NIL as character
 
 (defun p (m v)
@@ -94,12 +85,13 @@
     (loop
       with pos = 0
       with cursor = (editor-pane/cursor pane)
-      for v in (line->graphemes line)
+      for item across (cluffer:items line)
+      for v = (string item)
       do (progn
            (result (list v
                          (and (eq line (cluffer:line cursor))
                               (eql (cluffer:cursor-position cursor) pos))))
-           (incf pos (length v)))
+           (incf pos))
       finally (return (result (list nil (and (eq line (cluffer:line cursor))
                                              (eql (cluffer:cursor-position cursor) pos))))))))
 
@@ -138,7 +130,8 @@
   (loop
     with rows = (content-cache/rows cache)
     for i from 0 below (length rows)
-    do (setf (aref rows i) nil)))
+    do (setf (aref rows i) nil))
+  (setf (content-cache/num-rows cache) 0))
 
 (defun reallocate-pixmap (pane)
   (multiple-value-bind (pane-x1 pane-y1 pane-x2 pane-y2)
@@ -237,10 +230,7 @@
                                             :filled t :ink clim:+white+)
                       (clim:copy-from-pixmap pixmap rect-x y (- region-x2 region-x1) (- clear-bottom-y y) pane rect-x y)))
                   ;; Update the number of cached rows
-                  (setf (content-cache/num-rows cache) cache-row-index)))))
-  ;;
-  #+nil
-  (clim:queue-repaint pane (make-instance 'clim:window-repaint-event :sheet pane :region clim:+everywhere+)))
+                  (setf (content-cache/num-rows cache) cache-row-index))))))
 
 (defmethod clim:handle-repaint ((pane editor-pane) region)
   (multiple-value-bind (x1 y1 x2 y2)
@@ -252,8 +242,9 @@
     (clim:copy-from-pixmap (editor-pane/pixmap pane) x1 y1 (- x2 x1) (- y2 y1) pane x1 y1)))
 
 (defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
+  (log:trace "key event: ~s" event)
   (with-current-frame pane
-    (process-key pane *global-keymap* event)
+    (process-key-event *global-keymap* event)
     (recompute-and-repaint-content *frame*)))
 
 (defun make-editor-pane ()
@@ -273,25 +264,60 @@
                                             :height 600)))
     (clim:run-frame-top-level frame)))
 
-(define-edit-function move-right (() (:right))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Keyboard stuff
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun parse-keyboard-event (event)
+  "Given keyboard event EVENT, generate the corresponding key descriptor."
+  (let ((modifiers (clim:event-modifier-state event)))
+    (flet ((m (type name)
+             (if (eql (logand modifiers type) type) (list name) nil)))
+      (list* :key
+             (clim:keyboard-event-key-name event)
+             (append (m clim:+shift-key+ :shift)
+                     (m clim:+control-key+ :control)
+                     (m clim:+meta-key+ :meta)
+                     (m clim:+super-key+ :super)
+                     (m clim:+hyper-key+ :hyper)
+                     (m climi::+alt-key+ :alt))))))
+
+(defun process-key-event (keymap event)
+  (alexandria:when-let ((parsed (parse-keyboard-event event)))
+    (log:trace "parsed: ~s" parsed)
+    (unless (process-key keymap parsed)
+      (alexandria:when-let ((v (clim:keyboard-event-character event)))
+        (insert-string (string v))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Some standard editing functions
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(define-edit-function move-right (() ((:key :|f| :control) (:key :right)))
   (buffer-move-right (editor-pane/cursor *frame*)))
 
-(define-edit-function move-left (() (:left))
+(define-edit-function move-left (() ((:key :|b| :control) (:key :left)))
   (buffer-move-left (editor-pane/cursor *frame*)))
 
-(define-edit-function move-up (() (:up))
+(define-edit-function move-up (() ((:key :|p| :control) (:key :up)))
   (buffer-move-up (editor-pane/cursor *frame*)))
 
-(define-edit-function move-down (() (:down))
+(define-edit-function move-down (() ((:key :|n| :control) (:key :down)))
   (buffer-move-down (editor-pane/cursor *frame*)))
 
-(define-edit-function delete-left (() (:backspace))
+(define-edit-function delete-left (() ((:key :backspace)))
   (buffer-delete-left (editor-pane/cursor *frame*)))
 
-(define-edit-function delete-right (() (:delete))
+(define-edit-function delete-right (() ((:key :|d| :control) (:key :delete)))
   (buffer-delete-right (editor-pane/cursor *frame*)))
 
-(define-edit-function insert-newline (() (:return))
+(define-edit-function beginning-of-line (() ((:key :|a| :control) (:key :home)))
+  (buffer-beginning-of-line (editor-pane/cursor *frame*)))
+
+(define-edit-function end-of-line (() ((:key :|e| :control) (:key :end)))
+  (buffer-end-of-line (editor-pane/cursor *frame*)))
+
+(define-edit-function insert-newline (() ((:key :return)))
   (insert-string (format nil "~c" #\Newline)))
 
 (defun insert-string (string)
