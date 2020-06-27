@@ -241,7 +241,7 @@
       (recompute-and-repaint-content pane))
     (clim:copy-from-pixmap (editor-pane/pixmap pane) x1 y1 (- x2 x1) (- y2 y1) pane x1 y1)))
 
-(defmethod clim:handle-event ((pane editor-pane) (event clim:key-release-event))
+(defmethod clim:handle-event ((pane editor-pane) (event clim:key-press-event))
   (log:trace "key event: ~s" event)
   (with-current-frame pane
     (process-key-event *global-keymap* event)
@@ -319,6 +319,12 @@
 
 (define-edit-function insert-newline (() ((:key :return)))
   (insert-string (format nil "~c" #\Newline)))
+
+(define-edit-function scroll-down (() ((:key :|z| :control)))
+  (incf (editor-pane/scroll-pos *frame*)))
+
+(define-edit-function scroll-up (() ((:key :|z| :meta)))
+  (decf (editor-pane/scroll-pos *frame*)))
 
 (defun insert-string (string)
   (buffer-insert-string (editor-pane/cursor *frame*) string))
